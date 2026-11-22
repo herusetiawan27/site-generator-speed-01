@@ -15,8 +15,10 @@ const dirOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/'
 
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const ESCAPE_RE = /[&<>"']/g;
+const ESCAPE_TEST = /[&<>"']/;
 
 function escapeHtml(text) {
+  if (!ESCAPE_TEST.test(text)) return text;
   return text.replace(ESCAPE_RE, (c) => ESCAPES[c]);
 }
 
@@ -25,9 +27,18 @@ export const SLUG_MAX = 64;
 // Per-run cache: slugify's normalize() dominates its cost and tags/headings repeat.
 let slugCache = null;
 
+const NON_ASCII = /[^\x00-\x7F]/;
+
 function slugify(text) {
   const hit = slugCache.get(text);
   if (hit !== undefined) return hit;
+  if (!NON_ASCII.test(text)) {
+    let out = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '');
+    out = out.slice(0, SLUG_MAX).replace(/-+$/, '');
+    const slug = out === '' ? 'untitled' : out;
+    slugCache.set(text, slug);
+    return slug;
+  }
   const plain = text.normalize('NFKD').replace(/\p{M}/gu, '');
   let out = '';
   let gap = false;
@@ -177,22 +188,31 @@ function rtrimSpacesTabs(s) {
 }
 
 function parseFrontMatter(text) {
-  const lines = text.split('\n');
-  if (lines[0] !== '---') return { error: 'no front matter' };
-  let close = -1;
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i] === '---') {
-      close = i;
+  // Scan only the front-matter lines (a handful) instead of splitting the
+  // whole body: the body is recovered by offset, exactly as before.
+  const fmLines = [];
+  let pos = 0;
+  let off = -1;
+  while (true) {
+    const nl = text.indexOf('\n', pos);
+    const line = nl === -1 ? text.slice(pos) : text.slice(pos, nl);
+    if (fmLines.length === 0 && pos === 0) {
+      if (line !== '---') return { error: 'no front matter' };
+    } else if (line === '---') {
+      off = nl === -1 ? text.length : nl + 1;
       break;
+    } else {
+      fmLines.push(line);
     }
+    if (nl === -1) return { error: 'the front matter is not closed' };
+    pos = nl + 1;
   }
-  if (close === -1) return { error: 'the front matter is not closed' };
   const data = {};
-  for (let i = 1; i < close; i++) {
-    const line = lines[i];
+  for (let k = 0; k < fmLines.length; k++) {
+    const line = fmLines[k];
     if (isBlankLine(line) || line.charCodeAt(0) === 35) continue; // '#' comment
     const m = LINE.exec(line);
-    if (!m) return { error: `line ${i + 1} is not "key: value"` };
+    if (!m) return { error: `line ${k + 2} is not "key: value"` };
     const key = m[1];
     const raw = rtrimSpacesTabs(m[2] ?? '');
     if (!KEY_SET.has(key)) return { error: `unknown key "${key}"` };
@@ -203,9 +223,6 @@ function parseFrontMatter(text) {
     data[key] = v.value;
   }
   if (!Object.hasOwn(data, 'title')) return { error: 'no title' };
-  // Body without re-joining the split lines: offset past the closing line.
-  let off = 0;
-  for (let i = 0; i <= close; i++) off += lines[i].length + 1;
   return { data, body: text.slice(off) };
 }
 
@@ -480,7 +497,7 @@ function renderMarkdown(src, env) {
       }
     }
   }
-  return { html: blocks.map((b) => `${b}\n`).join(''), toc, excerpt: excerpt ?? '' };
+  return { html: blocks.length === 0 ? '' : `${blocks.join('\n')}\n`, toc, excerpt: excerpt ?? '' };
 }
 
 // ---------------------------------------------------------------- templates
@@ -724,7 +741,7 @@ function resolvePath(dir, rel) {
 function readSources(b) {
   const files = [...b.input.files].sort((x, y) => byCodeUnits(x.path, y.path));
   for (const f of files) {
-    if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.replace(/\r\n?/g, '\n') });
+    if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.indexOf('\r') === -1 ? f.content : f.content.replace(/\r\n?/g, '\n') });
     else b.statics.push({ path: f.path, content: f.content });
   }
 }
